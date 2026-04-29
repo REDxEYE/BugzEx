@@ -1,20 +1,20 @@
 #include <cstring>
+#include <filesystem>
 #include <iostream>
-#include <unordered_map>
-#include <vector>
 #include <string>
 #include <typeinfo>
+#include <unordered_map>
+#include <vector>
 
 #include <redscore/platform/file/native_file.h>
 
-#include "library.h"
 #include "bugz/custom_lz.hpp"
+#include "library.h"
 #include "redscore/platform/app_state.h"
-#include "redscore/platform/logger.h"
 #include "redscore/platform/buffer/buffer.h"
 #include "redscore/platform/file/memory_file.h"
+#include "redscore/platform/logger.h"
 #include "redscore/utils/simple_fileio.h"
-
 
 
 #if defined(__clang__) || defined(__GNUC__)
@@ -1624,10 +1624,10 @@ void export_languages(const std::filesystem::path &orig_file, const Localisation
     }
 }
 
-void export_model(const IO::Buffer &sec4, const OffsetAndSize &section4_resource, GltfHelper &helper,
-                  const std::filesystem::path &path) {
-    const auto resource_data = sec4.readonly_view(section4_resource.offset, section4_resource.size);
+void export_model(const IO::Buffer &sec4, const OffsetAndSize &section4_resource,
+    GltfHelper &helper, const std::filesystem::path &path, int model_id) {
 
+    const auto resource_data = sec4.readonly_view(section4_resource.offset, section4_resource.size);
     const auto ident = resource_data.reinterpret_at<u32>(0);
     if (*ident != 0x41) {
         GLog_Info("Resource @ {} in section 4 is not a model", section4_resource.offset);
@@ -1644,11 +1644,11 @@ void export_model(const IO::Buffer &sec4, const OffsetAndSize &section4_resource
     struct MeshEntry {
         u32 vertex_offset;
         u32 vertex_count;
-        u32 unk2;
-        u32 unk_offset;
+        u32 normal_offset;
+        u32 normal_count;
         u32 primitive_offset;
         u32 primitive_count;
-        u32 unk6;
+        u32 unk;
     };
 
     // u32 global_vertex_count = 0;
@@ -1708,7 +1708,8 @@ void export_model(const IO::Buffer &sec4, const OffsetAndSize &section4_resource
     static_assert(sizeof(Prim56) == 24);
 
 
-    for (const auto &mesh: meshes) {
+    // Read submeshes
+    for (const auto& mesh : meshes) {
         const auto vertex_buffer = mesh_data.subview(mesh.vertex_offset, mesh.vertex_count * sizeof(Vertex)).
                 readonly_view_as<Vertex>();
         auto primitive_reader = IO::MemoryViewFile(mesh_data.subview(mesh.primitive_offset));
@@ -1816,14 +1817,17 @@ void export_model(const IO::Buffer &sec4, const OffsetAndSize &section4_resource
         );
     }
 
-    const auto gltf_model = helper.model();
+    // Create model output folder
+    std::filesystem::path model_dir = path.parent_path() / "models";
+    std::filesystem::create_directories(model_dir);
 
-    tinygltf::TinyGLTF writer;
-    std::filesystem::path gltf_output_path = path;
-    gltf_output_path.replace_extension("gltf");
-    writer.WriteGltfSceneToFile(&gltf_model, gltf_output_path.string(), true, true, true, false);
+    // Export model to GLTF file
+    std::filesystem::path model_out_path = model_dir / std::format("model_{}.gltf", model_id);
+    tinygltf::TinyGLTF gltf_writer;
+    gltf_writer.WriteGltfSceneToFile(&helper.model(), model_out_path.string(), true, true, true, false);
+    helper.reset();
 
-    GLog_Info("A");
+    GLog_Info("Exported model to {}", model_out_path.string());
 }
 
 int main() {
@@ -1837,12 +1841,15 @@ int main() {
     bze_file.m_file->set_position(2048);
     for (const auto &section_header: bze_file.section_headers) {
         const auto data = bze_file.m_file->read_exact<u8>(section_header.size);
-        std::filesystem::path output_path = path;
-        output_path.replace_extension(std::format("sec_{}", section_header.index));
         std::vector<u8> decompressed(0x280000);
         const auto res = custom_lz::lz_decompress(data.data(), decompressed.data());
         decompressed.resize(res.bytes_written);
-        write_file(output_path, decompressed);
+
+        // Export decompressed sections to a new folder
+        std::filesystem::path out_dir = path.parent_path() / "sections";
+        std::filesystem::create_directories(out_dir);
+        std::filesystem::path out_path = out_dir / ("sec_" + std::to_string(section_header.index));
+        write_file(out_path, decompressed);
         bze_file.m_file->align(2048);
     }
 
@@ -1855,9 +1862,10 @@ int main() {
     //export_languages(path, bze_file.tags.tag49, sec3);
 
     AppState app(path.parent_path().parent_path());
-    for (const auto& tag22: bze_file.tags.tag22) {
+    for (int i = 0; i < bze_file.tags.tag22.size(); ++i) {
+        const Tag22& tag22 = bze_file.tags.tag22[i];
         for (const auto &section4_resource: tag22.section4_resources) {
-            export_model(sec4.value(), section4_resource, app.helper(), path);
+            export_model(sec4.value(), section4_resource, app.helper(), path, i);
         }
     }
 
